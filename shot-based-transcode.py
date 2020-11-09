@@ -100,24 +100,30 @@ class Video:
 			print("Unknown Encoder: " + str(encoder))
 	
 	
-	def calculateVMAF(self):
+	def calculateVMAF(self, modelPath, subSample):
 		# which shots need analysing
 		listOfUnoptimisedShots = []
+		firstFrame = 0
+		lastFrame = 0
 		for shot in self.listOfShots:
 			optimised = False
 			for rq in shot.qpVmaf:
 				if rq[0] == shot.currentQP:
 					optimised = True
 			if not optimised:
-				listOfUnoptimisedShots.append(shot)
+				shotLength = shot.lastFrame - shot.firstFrame
+				lastFrame = firstFrame + shotLength
+				listOfUnoptimisedShots.append((shot, firstFrame, lastFrame))
+				print(firstFrame, lastFrame)
+				firstFrame = lastFrame + 1
 		
 		# generate selection string
-		lastShotFirstFrame = listOfUnoptimisedShots[-1].firstFrame
+		lastShotFirstFrame = listOfUnoptimisedShots[-1][0].firstFrame
 		selectString = "select="
-		for shot in listOfUnoptimisedShots:
-			startTime = str(shot.firstTime)
-			endTime = str(shot.lastTime)
-			selectString += "between(t\," + startTime + "\," + endTime + ")"
+		for i in listOfUnoptimisedShots:
+			shot = i[0]
+			selectString += "between(n\," + str(shot.firstFrame) + "\,"
+			selectString += str(shot.lastFrame) + ")"
 			if shot.firstFrame != lastShotFirstFrame:
 				selectString += "+"
 				
@@ -127,9 +133,11 @@ class Video:
 		# Assemble select, scale and vmaf filter strings
 		selectStringMain = "[0:v]" + selectString + "[main]; "
 		selectStringRef = "[1:v]" + selectString + "[ref]; "		
-		scaleStringMain = "[main]scale=1920x1080:flags=bicubic[main]; "
-		scaleStringRef = "[ref]scale=1920x1080:flags=bicubic[ref]; "		
-		vmafFilterString = "[main][ref]libvmaf=log_path=" + vmafOut + ":log_fmt=csv:n_subsample=1"
+		scaleStringMain = "[main]scale=1920x1080:flags=bicubic,settb=AVTB,setpts=PTS-STARTPTS[main]; "
+		scaleStringRef = "[ref]scale=1920x1080:flags=bicubic,settb=AVTB,setpts=PTS-STARTPTS[ref]; "		
+		vmafFilterString = "[main][ref]libvmaf=model_path=" + modelPath
+		vmafFilterString += ":log_path=" + vmafOut
+		vmafFilterString += ":log_fmt=csv:n_subsample=" + str(subSample)
 		
 		# Assemble final filter string
 		filterString = selectStringMain + scaleStringMain + selectStringRef + \
@@ -137,7 +145,8 @@ class Video:
 		
 		# Assemble FFmpeg command	
 		vmafCommand = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", 
-						"-i", self.outputFile, "-i", self.videoFile, 
+						"-r", "24", "-i", self.outputFile, 
+						"-r", "24", "-i", self.videoFile, 
 						"-filter_complex", filterString, "-f", "null", "-"]
 		
 		# Run FFmpeg command
@@ -147,13 +156,10 @@ class Video:
 		vmaf_df = pd.read_csv(vmafOut, usecols=['Frame', 'vmaf'])
 		
 		# Add QP-VMAF pairs to shot data
-		firstNonAnalysedFrame = 0
 		for shot in listOfUnoptimisedShots:
-			shotLength = shot.lastFrame - shot.firstFrame
-			endOfShotFrame = firstNonAnalysedFrame + shotLength
-			shotVmaf = vmaf_df.loc[(vmaf_df['Frame'] >= firstNonAnalysedFrame) & (vmaf_df['Frame'] <= endOfShotFrame)]
-			shot.addQpVmaf(shot.currentQP, shotVmaf['vmaf'].mean())
-			firstNonAnalysedFrame += shotLength+1
+			shotVmaf = vmaf_df.loc[(vmaf_df['Frame'] >= shot[1]) & 
+									(vmaf_df['Frame'] <= shot[2])]
+			shot[0].addQpVmaf(shot[0].currentQP, shotVmaf['vmaf'].mean())
 	
 	
 	def calculateNewSettings(self, targetVMAF):
@@ -162,7 +168,6 @@ class Video:
 			
 	
 	def printSummary(self, targetVMAF):
-		print("Shot - BestQP - VMAF - NewQP")
 		shotNumber = 0
 		vmaf = 0.0
 		totalNumFrames = 0
@@ -171,7 +176,16 @@ class Video:
 			totalNumFrames += numFrames
 			bestRQ = min(shot.qpVmaf, key=lambda rq: abs(rq[1] - targetVMAF))
 			vmaf += numFrames*bestRQ[1]
-			print(shotNumber, bestRQ[0], bestRQ[1], shot.currentQP)
+
+			print("Shot: " + str(shotNumber))
+			print("Frames: " + str(shot.firstFrame) + "-" + str(shot.lastFrame))
+			print("Best: " + str(bestRQ[0]) + " - " + str(bestRQ[1]))
+			print("Next: " + str(shot.currentQP))
+			print("History:")
+			for i in shot.qpVmaf:
+				print(str(i[0]) + " - " + str(i[1]))
+			print()
+			
 			shotNumber += 1
 		print("Average VMAF: " + str(vmaf/totalNumFrames))
 	
@@ -191,15 +205,15 @@ class Video:
 		return optimised
 	
 	
-	def optimise(self, targetVMAF):
+	def optimise(self, targetVMAF, encoder, modelPath, subSample):
 		print("Starting optimising for VMAF: " + str(targetVMAF))
 		while self.isOptimised() == False:
 			print("Iteration: " + str(self.iteration+1))
 			print("Transcoding ...")
-			self.transcode("x264")
+			self.transcode(encoder)
 			
 			print("Calculating quality ...")
-			self.calculateVMAF()
+			self.calculateVMAF(modelPath, subSample)
 			
 			print("Calculating new setting")
 			self.calculateNewSettings(targetVMAF)
@@ -276,8 +290,11 @@ def main():
 	# Manage arguments
 	parser = ArgumentParser()
 	parser.add_argument("file", nargs="?")
-	parser.add_argument("-q", "--quality", type=float, default=80.0)
+	parser.add_argument("-q", "--quality", type=float, default=85.0)
+	parser.add_argument("-e", "--encoder", type=str, default="x264")	
 	parser.add_argument("-t", "--threshold", type=float, default=30.0)
+	parser.add_argument("-m", "--model", type=str, default="/usr/local/share/model/vmaf_v0.6.1.pkl")
+	parser.add_argument("-s", "--subsample", type=int, default=1)
 	args = parser.parse_args()
 	fileName = abspath(args.file)
 	
@@ -289,7 +306,7 @@ def main():
 	video.sortShots()
 	
 	# Optimise for quality (re-transcode until suitable VMAF achieved)
-	video.optimise(args.quality)
+	video.optimise(args.quality, args.encoder, args.model, args.subsample)
 	
 	# Store end time & print total time
 	endTime = datetime.datetime.now()
