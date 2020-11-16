@@ -81,14 +81,14 @@ class Video:
 	
 	def transcodeX264(self):
 		# Generate I-Frame and Zones strings for FFmpeg
-		IFramesString = ""
+		IFramesString = "expr:"
 		zonesString = "zones="
 		for shot in self.listOfShots:
 			qp = shot.nextQP
-			IFramesString += str(shot.firstTime)
+			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame) + ",q=" + str(qp)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
-				IFramesString += ","
+				IFramesString += "+"
 				zonesString += "/"
 		
 		# Generate complete x264 parameter string for FFmpeg		
@@ -104,6 +104,13 @@ class Video:
 				"-disposition:v", "default", "-map", "0:1", "-c:a:0", "ac3", "-b:a:0", 
 				"640k", "-metadata:s:a:0", "title\=", "-disposition:a:0", "default", 
 				"-sn", "-metadata:g", "title\=", self.outputFile]
+		
+# 		x264 = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", "-i", self.videoFile, 
+# 				"-y", "-force_key_frames:v", IFramesString, "-c:v", 
+# 				"libx264", "-pass", "1", "-preset:v", "medium", "-x264-params", paramsString, 
+# 				"-profile:v", "high", "-color_primaries:v", "bt470bg", "-color_trc:v", 
+# 				"bt709", "-colorspace:v", "smpte170m", "-metadata:s:v", "title\=", 
+# 				"-disposition:v", "default", "-an", self.outputFile]
 		
 		# Run FFmpeg command
 		a = run(x264)
@@ -252,7 +259,7 @@ class Video:
 	
 	def calculateNewSettings(self, targetVMAF):
 		for shot in self.listOfShots:
-			shot.calculateNewQP4(targetVMAF, self.minQP, self.maxQP)
+			shot.calculateNewQP(targetVMAF, self.minQP, self.maxQP)
 			
 	
 	def printSummary(self, targetVMAF):
@@ -317,17 +324,15 @@ class Shot:
 	def __init__(self, scene_list, guess):
 		if scene_list[0].get_frames() == 0:
 			self.firstFrame = scene_list[0].get_frames()
-			self.firstTime = scene_list[0].get_seconds()
 		else:
 			self.firstFrame = scene_list[0].get_frames()+1
-			self.firstTime = scene_list[0].get_seconds()+(1.0/scene_list[0].get_framerate())
 		self.lastFrame = scene_list[1].get_frames()
 		self.lastTime = scene_list[1].get_seconds()
 		self.nextQP = guess
 		self.qpVmaf = []
 	
 	
-	def calculateNewQP4(self, targetVMAF, minQP, maxQP):
+	def calculateNewQP(self, targetVMAF, minQP, maxQP):
 		# Make sure there is some data to process
 		numDataPoints = len(self.qpVmaf)
 		if numDataPoints == 0:
@@ -346,13 +351,9 @@ class Shot:
 		
 		# Sort qpVmaf by QP from low to high
 		qpVmafSorted = sorted(self.qpVmaf, key=lambda row: row[0])
-			
-		# Modelling the qp-vmaf curve as y=100 up to an unknown (possibly negative)
-		# qp number refered in the code as "t" for transition. After that the curve
-		# is modelled as a 4th order polynomial:
-		# a(x-t)^4 + b(x-t)^3 + c(x-t)^2 + d(x-t) + e
 		
-		# Initially
+		# "t" is the transition point in QP where VMAF stops equalling 100.
+		# First guess is at 0
 		t = 0
 		
 		# If there are multiple VMAF=100 entries remove all but the one with
@@ -391,22 +392,12 @@ class Shot:
 		y = [x[1] for x in qpVmafSorted]
 		numDataPoints = len(x)
 		
-		# If only one data point assume e=100 and calculate by hand
+		# If only one data point, assume curve fits to y = a(x-t)^4 + e and e=100.
+		# Else use UnivariateSpline function
 		if numDataPoints == 1:
-			# y = a(x-t)^4 + e
 			a = (y[0]-100.0)/((x[0]-t)**4)
 			y2 = [(a*(x-t)**4 + 100.0) for x in allowableQPs]
 		else:
-			# Polynomial degree (list of which orders to include)
-			deg = np.append(np.arange(4,(5-numDataPoints),-1),0)
-			if numDataPoints > 5:
-				deg = [4,3,2,1,0]
-			
-			# Use numpy polyfit function
-			c, stats = P.polyfit(x,y,deg,full=True)
-			y2 = [P.polyval(x,c) for x in allowableQPs]
-			
-			# Use scipy univariate spline fit function
 			spline = UnivariateSpline(x,y, k=1)
 			y2 = [spline(x) for x in allowableQPs]
 			
@@ -416,268 +407,6 @@ class Shot:
 		# Select value closest to targetVMAF. Then limit the size of QP jump.
 		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
 		nextQP = min(nextQP, self.nextQP + maxQpStep)
-		self.nextQP = nextQP
-		return 1
-		
-	
-	def calculateNewQP3(self, targetVMAF, minQP, maxQP):
-		# Make sure there is some data to process
-		numDataPoints = len(self.qpVmaf)
-		if numDataPoints == 0:
-			print("Error: Should not have called calculateNewQP before first transcode")
-			exit()
-			
-		# If the most recent VMAF is 100.0 add 1/3rd of total QP range to QP
-		maxQpStep = int(np.ceil((maxQP-minQP)/3.0))
-		if [x[1] for x in self.qpVmaf].count(100.0) == numDataPoints:
-			if self.nextQP + maxQpStep <= maxQP:
-				nextQP = self.nextQP + maxQpStep
-			else:
-				nextQP = maxQP
-			self.nextQP = nextQP
-			return 1
-		
-		# Sort qpVmaf by QP from low to high
-		qpVmafSorted = sorted(self.qpVmaf, key=lambda row: row[0])
-			
-			
-		# Modelling the qp-vmaf curve as y=100 up to an unknown (possibly negative)
-		# qp number refered in the code as "t" for transition. After that the curve
-		# is modelled as a 4th order polynomial:
-		# a(x-t)^4 + b(x-t)^3 + c(x-t)^2 + d(x-t) + e
-		
-		# Initially
-		t = 0
-		e = 100
-		
-		# If there are multiple VMAF=100 entries remove all but the one with
-		# the largest QP
-		while [x[1] for x in qpVmafSorted].count(100.0) > 1:
-			qpVmafSorted.pop(0)
-			
-		# If vmaf==100 is in the data, store, set "t" as that qp value then remove it
-		if [x[1] for x in qpVmafSorted].count(100.0) == 1:
-			t = qpVmafSorted[0][0]
-			qpVmafSorted.pop(0)
-		
-		# At this point qpVmafSorted should only contain data from the 4th order
-		# polynomial part of the qp-vmaf curve, plus we should have an initial guess
-		# for "t"
-			
-		# Separate into x's and y's and recalculate number of data points
-		x = [x[0] for x in qpVmafSorted]
-		y = [x[1] for x in qpVmafSorted]
-		numDataPoints = len(x)
-		
-		# If there are two or more data points we can have a better guess for "t" based
-		# on the reduced 4th order polynomial: y = a(x-t)^4 + e
-		# with two sets of data we can rearrange as:
-		# [(x1-t)^4]/[(x2-t)^4] - (y1 - e)/(y2 - e) = 0
-		# I then brute force guess allowable "t" values to find the value
-		if numDataPoints >= 2:
-			maxT = maxQP
-			for rq in qpVmafSorted:
-				if rq[1] < 100.0:
-					maxT = rq[0]
-					break
-			minT = -50.0
-			for rq in qpVmafSorted:
-				if rq[1] == 100.0:
-					minT = rq[1]
-			allowableTs = np.arange(minT,maxT,0.1)
-			Ys = ((y[0]-e)/(y[-1]-e))
-			XTs = [((x[0]-t)**4)/(x[-1]-t)**4 - Ys for t in allowableTs]
-			xpPredictions = list(zip(allowableTs, XTs))
-			newT = min(xpPredictions, key=lambda l: abs(l[1]))[0]
-			if newT > t:
-				t = newT
-			print("t = " + str(t))
-		
-		# "t" provides us the minimum QP we can usefully use for a new guess (anything
-		# smaller would produce vmaf=100.0)
-		if t > minQP:
-			minQP = int(np.ceil(t))
-			
-		# The maximum QP can be lowered to the smallest QP in the qpVmaf array so long
-		# as the VMAF is smaller than targetVMAF
-		for rq in qpVmafSorted:
-			if rq[1] < targetVMAF:
-				maxQP = rq[0]
-				break
-		
-		# Use minQP and maxQP to construct array of all allowable QPs
-		print(minQP, maxQP)
-		allowableQPs = np.arange(minQP, maxQP+1, 1)
-			
-		# Use previous data to construct qp-vmaf curve
-		if numDataPoints <= 2:
-			# y = a(x-t)^4 + e
-			#if y[-1] > 95.0:
-			#	y[-1] = 95.0
-			a = (y[-1]-e)/((x[-1]-t)**4)
-			y2 = [(a*(x-t)**4 + e) for x in allowableQPs]
-		elif numDataPoints == 3:
-			# y = a(x-t)^4 + b(x-t)^3 + e
-			denom = ((x[2]-t)**3 * (x[1]-t)**4) - ((x[1]-t)**3 * (x[2]-t)**4)
-			b = ((x[1]-t)**4 * (y[2] - e) - (x[2]-t)**4 * (y[1] - e))/denom
-			a = (y[1] - e - b*(x[1]-t)**3)/(x[1]-t)**4
-			y2 = [(a*(x-t)**4 + b*(x-t)**3 + e) for x in allowableQPs]
-		else:
-			# Scipy linear interpolation
-			f = interp1d(x, y, kind="linear", bounds_error=False, fill_value="extrapolate")
-			y2 = f(allowableQPs)
-		
-		# Use qp-vmaf curve to predict QP value
-		qpVmafPredictions = list(zip(allowableQPs, y2))
-		
-		# Select value closest to targetVMAF. Then limit the size of QP jump.
-		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
-		nextQP = min(nextQP, self.nextQP + maxQpStep)
-		self.nextQP = nextQP
-		return 1
-	
-	
-	def calculateNewQP2(self, targetVMAF, minQP, maxQP):
-		# Pre-process existing data
-		numDataPoints = len(self.qpVmaf)
-		if numDataPoints != 0:
-			# Sort qpVmaf by QP from low to high
-			qpVmafSorted = sorted(self.qpVmaf, key=lambda row: row[0])
-		
-			# If there are multiple VMAF=100 entries remove all but the one with
-			# the largest QP
-			while [x[1] for x in qpVmafSorted].count(100.0) > 1:
-				qpVmafSorted.pop(0)
-			
-			# Separate into x's and y's
-			x = [x[0] for x in qpVmafSorted]
-			y = [x[1] for x in qpVmafSorted]
-		else:
-			print("Error: Should not have called calculateNewQP before first transcode")
-			exit()
-			
-		# If most recent VMAF is 100.0 add 1/3rd of total QP range to QP
-		if y[-1] >= 100.0:
-			if self.nextQP + 10 <= maxQP:
-				nextQP = self.nextQP + int(np.ceil((maxQP-minQP)/3.0))
-			else:
-				nextQP = maxQP
-			self.nextQP = nextQP
-			return 1
-		
-		
-		# Modelling the qp-vmaf curve as y=100 up to an unknown (possibly negative)
-		# qp number refered in the code as "t" for transition. After that the curve
-		# is modelled as a 4th order polynomial:
-		# a(x-t)^4 + b(x-t)^3 + c(x-t)^2 + d(x-t) + e
-		
-		# Maximum value when (x-t) == 0 is 100.0 therefore:
-		e = 100.0
-		
-		# First, calculate "t". Before we have two results we assume t=0 as there is not
-		# enough data to calculate it. This is the "simplified" calculation of "t" based
-		# on the equation: a(x-t)^4 + e. I am assuming "t" will not change.
-		t = 0
-		if numDataPoints >= 2:
-			if y[0] == 100.0 and numDataPoints == 2:
-				t = x[0]
-			else:
-				maxT = x[0]
-				lowIndex = 0
-				if y[0] == 100.0:
-					maxT = x[1]
-					lowIndex = 1
-				allowableTs = np.arange(0,maxT,0.1)
-				XTs = [((x[lowIndex]-t)**4)/(x[-1]-t)**4 for t in allowableTs]
-				Ys = ((y[lowIndex]-e)/(y[-1]-e))
-				xpPredictions = list(zip(allowableTs, XTs))
-				t = min(xpPredictions, key=lambda l: abs(l[1] - Ys))[0]
-		
-		# "t" provides us the minimum QP we can usefully use for a new guess (anything
-		# smaller would produce vmaf=100.0)
-		if t > minQP:
-			minQP = int(np.ceil(t))
-		allowableQPs = np.arange(minQP, maxQP+1, 1)
-			
-		# Use previous data to construct qp-vmaf curve
-		if numDataPoints <= 2:
-			# y = a(x-t)^4 + e
-			if y[-1] > 95.0:
-				y[-1] = 95.0
-			a = (y[-1]-e)/((x[-1]-t)**4)
-			y2 = [(a*(x-t)**4 + e) for x in allowableQPs]
-		elif numDataPoints == 3:
-			# y = a(x-t)^4 + b(x-t)^3 + e
-			denom = ((x[2]-t)**3 * (x[1]-t)**4) - ((x[1]-t)**3 * (x[2]-t)**4)
-			b = ((x[1]-t)**4 * (y[2] - e) - (x[2]-t)**4 * (y[1] - e))/denom
-			a = (y[1] - e - b*(x[1]-t)**3)/(x[1]-t)**4
-			y2 = [(a*(x-t)**4 + b*(x-t)**3 + e) for x in allowableQPs]
-		else:
-			# Scipy linear interpolation
-			f = interp1d(x, y, kind="linear", bounds_error=False, fill_value="extrapolate")
-			y2 = f(allowableQPs)
-		
-		# Use qp-vmaf curve to predict QP value
-		qpVmafPredictions = list(zip(allowableQPs, y2))
-		
-		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
-		self.nextQP = nextQP
-		return 1
-			
-				
-	def calculateNewQP(self, targetVMAF, minQP, maxQP):
-		# Array of allowable QPs
-		allowableQPs = np.arange(minQP, maxQP+1, 1)
-		
-		# Arrange previous data
-		numDataPoints = len(self.qpVmaf)
-		if numDataPoints != 0:
-			qpVmafSorted = sorted(self.qpVmaf, key=lambda row: row[0])
-			x = [x[0] for x in qpVmafSorted]
-			y = [x[1] for x in qpVmafSorted]
-		
-			# Prepend qp=0, vmaf=100 to previous data if there is not already a vmaf score
-			# equal to or greater than 100.
-			if max(y) < 100.0:
-				x.insert(0,0)
-				y.insert(0,100.0)
-				
-			# Recalculate number of datapoints
-			numDataPoints = len(x)
-		else:
-			print("Error: Should not have called calculateNewQP before first transcode")
-			exit()
-		
-		# Use previous data to construct qp-vmaf curve
-		if numDataPoints == 1:
-			if self.nextQP + 10 <= maxQP:
-				nextQP = self.nextQP + 10
-			else:
-				nextQP = maxQP
-			self.nextQP = nextQP
-			return 1
-		elif numDataPoints == 2:
-			# y = ax^4 + c
-			if y[1] > 95.0:
-				y[1] = 95.0
-			c = y[0]
-			a = (y[1]-y[0])/(x[1]**4)
-			y2 = [(a*x**4 + c) for x in allowableQPs]
-		elif numDataPoints == 3:
-			# y = ax^4 + bx^3 + c
-			c = y[0]
-			denom = (x[2]**3 * x[1]**4) - (x[1]**3 * x[2]**4)
-			b = (x[1]**4 * (y[2] - c) - x[2]**4 * (y[1] - c))/denom
-			a = (y[1] - c - b*x[1]**3)/x[1]**4
-			y2 = [(a*x**4 + b*x**3 + c) for x in allowableQPs]
-		else:
-			# Scipy linear interpolation
-			f = interp1d(x, y, kind="linear", bounds_error=False, fill_value="extrapolate")
-			y2 = f(allowableQPs)
-		
-		# Use qp-vmaf curve to predict QP value
-		qpVmafPredictions = list(zip(allowableQPs, y2))
-		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
 		self.nextQP = nextQP
 		return 1
 		
