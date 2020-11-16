@@ -90,6 +90,11 @@ class Video:
 				qp = self.maxQP
 			else:
 				qp = shot.nextQP
+			
+			# If ratecontrol is qp make sure next qp is an int
+			if self.rc == "q":
+				qp = int(qp)
+				
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
 			zonesString += "," + str(self.rc) + "=" + str(qp)
@@ -118,6 +123,11 @@ class Video:
 		zonesString = "zones="
 		for shot in self.listOfShots:
 			qp = shot.nextQP
+			
+			# If ratecontrol is qp make sure next qp is an int
+			if self.rc == "q":
+				qp = int(qp)
+				
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
 			zonesString += "," + str(self.rc) + "=" + str(qp)
@@ -340,7 +350,7 @@ class Video:
 			print("Calculating new setting")
 			self.calculateNewSettings(targetVMAF)
 			
-			self.printSummary(targetVMAF)
+			#self.printSummary(targetVMAF)
 			self.printStatus()
 			self.iteration += 1
 					
@@ -541,7 +551,7 @@ def main():
 	video.optimise(args.quality, args.model, args.subsample)
 	
 	# Print details
-	video.printSummary(args.quality)
+	#video.printSummary(args.quality)
 	
 	# Final transcode
 	video.finalTranscode()
