@@ -77,14 +77,17 @@ class Video:
 			self.transcodeX265()
 		else:
 			print("Unknown encoder, again!")
-			
-	
+		
+		
 	def transcodeX264(self):
 		# Generate I-Frame and Zones strings for FFmpeg
 		IFramesString = "expr:"
 		zonesString = "zones="
 		for shot in self.listOfShots:
-			qp = shot.nextQP
+			if shot.isOptimised():
+				qp = self.maxQP
+			else:
+				qp = shot.nextQP
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame) + ",q=" + str(qp)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
@@ -94,10 +97,10 @@ class Video:
 		# Generate complete x264 parameter string for FFmpeg		
 		paramsString = "scenecut=0:"
 		paramsString += zonesString
-		
+
 		x264 = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", "-i", self.videoFile, 
-				"-y", "-force_key_frames:v", IFramesString, "-c:v", 
-				"libx264", "-preset:v", "medium", "-x264-params", paramsString, 
+				"-y", "-force_key_frames:v", IFramesString, 
+				"-c:v",	"libx264", "-preset:v", "medium", "-x264-params", paramsString, 
 				"-profile:v", "high", "-color_primaries:v", "bt470bg", "-color_trc:v", 
 				"bt709", "-colorspace:v", "smpte170m", "-metadata:s:v", "title\=", 
 				"-disposition:v", "default", "-an", self.outputFile]
@@ -165,7 +168,7 @@ class Video:
 		
 		# Run FFmpeg command
 		a = run(x265)
-		
+	
 	
 	def calculateVideoVMAF(self, modelPath):
 		print("Calculating quality ...")
@@ -210,9 +213,9 @@ class Video:
 		print("VMAF 75th percentile = " + str(vmafP75))
 		print("VMAF 25th percentile = " + str(vmafP25))
 		print("VMAF minimum = " + str(vmafMin))
-		
-		
-	def calculateVMAF(self, modelPath, subSample):
+			
+				
+	def calculatePerShotVmaf(self, modelPath, subSample):
 		print("Calculating quality ...")
 		
 		# which shots need analysing
@@ -268,9 +271,8 @@ class Video:
 		for shot in listOfUnoptimisedShots:
 			shotVmaf = vmaf_df.loc[(vmaf_df['Frame'] >= shot[1]) & 
 									(vmaf_df['Frame'] <= shot[2])]
-			# Calculate average VMAF (mean, harmonic, 25th percentile)
-			#aveVmaf = shotVmaf['vmaf'].mean()
-			#aveVmaf = stats.hmean(shotVmaf['vmaf'],axis=0)
+			
+			# Calculate 25th percentile VMAF
 			aveVmaf = np.percentile(shotVmaf['vmaf'], q=25)
 			
 			# Add QP-VMAF pair to shot object
@@ -323,16 +325,18 @@ class Video:
 	
 	def optimise(self, targetVMAF, modelPath, subSample):
 		print("Starting optimising for VMAF: " + str(targetVMAF))
+		
 		while not self.isOptimised():
 			print("Iteration: " + str(self.iteration+1))
 			self.transcode()
 			
-			self.calculateVMAF(modelPath, subSample)
+			#self.calculateVMAF(modelPath, subSample)
+			self.calculatePerShotVmaf(modelPath, subSample)
 			
 			print("Calculating new setting")
 			self.calculateNewSettings(targetVMAF)
 			
-			#self.printSummary(targetVMAF)
+			self.printSummary(targetVMAF)
 			self.printStatus()
 			self.iteration += 1
 					
@@ -347,7 +351,6 @@ class Shot:
 		else:
 			self.firstFrame = scene_list[0].get_frames()+1
 		self.lastFrame = scene_list[1].get_frames()
-		self.lastTime = scene_list[1].get_seconds()
 		self.nextQP = guess
 		self.qpVmaf = []
 	
