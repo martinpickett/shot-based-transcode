@@ -7,8 +7,8 @@ from argparse import ArgumentParser
 
 import pandas as pd
 import numpy as np
-from numpy.polynomial import polynomial as P
-from scipy.interpolate import interp1d
+#from numpy.polynomial import polynomial as P
+#from scipy.interpolate import interp1d
 from scipy.interpolate import UnivariateSpline
 from scipy import stats
 
@@ -18,7 +18,7 @@ from scenedetect.detectors import ContentDetector
 
 class Video:
 	
-	def __init__(self, videoFile, encoder):
+	def __init__(self, videoFile, encoder, ratecontrol, tolerance):
 		self.videoFile = videoFile
 		self.outputFile = basename(videoFile)
 		self.listOfShots = []
@@ -26,6 +26,8 @@ class Video:
 		self.encoder = encoder[0]
 		self.minQP = encoder[1]
 		self.maxQP = encoder[2]
+		self.rc = ratecontrol
+		self.tol = tolerance
 		
 
 	def generateShotList(self, threshold, guess):
@@ -89,7 +91,8 @@ class Video:
 			else:
 				qp = shot.nextQP
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
-			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame) + ",q=" + str(qp)
+			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
+			zonesString += "," + str(self.rc) + "=" + str(qp)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
 				IFramesString += "+"
 				zonesString += "/"
@@ -116,7 +119,8 @@ class Video:
 		for shot in self.listOfShots:
 			qp = shot.nextQP
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
-			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame) + ",q=" + str(qp)
+			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
+			zonesString += "," + str(self.rc) + "=" + str(qp)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
 				IFramesString += "+"
 				zonesString += "/"
@@ -281,7 +285,7 @@ class Video:
 	
 	def calculateNewSettings(self, targetVMAF):
 		for shot in self.listOfShots:
-			shot.calculateNewQP(targetVMAF, self.minQP, self.maxQP)
+			shot.calculateNewQP(targetVMAF, self.minQP, self.maxQP, self.tol)
 			
 	
 	def printSummary(self, targetVMAF):
@@ -355,7 +359,7 @@ class Shot:
 		self.qpVmaf = []
 	
 	
-	def calculateNewQP(self, targetVMAF, minQP, maxQP):
+	def calculateNewQP(self, targetVMAF, minQP, maxQP, tol):
 		# Make sure there is some data to process
 		numDataPoints = len(self.qpVmaf)
 		if numDataPoints == 0:
@@ -408,7 +412,7 @@ class Shot:
 				break
 		
 		# Use minQP and maxQP to construct array of all allowable QPs
-		allowableQPs = np.arange(minQP, maxQP+1, 1)
+		allowableQPs = np.arange(minQP, maxQP+1, tol)
 			
 		# Separate into x's and y's and recalculate number of data points
 		x = [x[0] for x in qpVmafSorted]
@@ -427,9 +431,10 @@ class Shot:
 		# Use qp-vmaf curve to predict QP value
 		qpVmafPredictions = list(zip(allowableQPs, y2))
 	
-		# Select value closest to targetVMAF. Then limit the size of QP jump.
+		# Select value closest to targetVMAF. Then limit the size of QP jump. Then round.
 		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
 		nextQP = min(nextQP, self.nextQP + maxQpStep)
+		nextQP = round(nextQP, int(-np.log10(tol)))
 		self.nextQP = nextQP
 		return 1
 		
@@ -473,8 +478,10 @@ def main():
 	parser.add_argument("file", nargs="?")
 	parser.add_argument("-q", "--quality", type=float, default=85.0)
 	parser.add_argument("-e", "--encoder", type=str, default="x264")
+	parser.add_argument("-rc", "--ratecontrol", type=str, default="q")
+	parser.add_argument("-tol", "--tolerance", type=float, default=1.0)
 	parser.add_argument("-g", "--guess", type=int, default=30)
-	parser.add_argument("-t", "--threshold", type=float, default=30.0)
+	parser.add_argument("-th", "--threshold", type=float, default=30.0)
 	parser.add_argument("-m", "--model", type=str, default="/usr/local/share/model/vmaf_v0.6.1.pkl")
 	parser.add_argument("-s", "--subsample", type=int, default=1)
 	args = parser.parse_args()
@@ -494,12 +501,26 @@ def main():
 	allowableEncoders = ["x264", "x265"]
 	if args.encoder not in allowableEncoders:
 		print("Unknown encoder: " + str(args.encoder))
+		print("Allowable encoders are ")
 		exit()
 		
 	# Select correct encoder tuple (encoderName, minQP, maxQP)
 	encoder = ("x264", 10, 51)
 	if args.encoder == "x265":
 		encoder = ("x265", 0, 61)
+	
+	# Check for valid ratecontrol
+	allowableRatecontrols = ["q", "crf"]
+	if args.ratecontrol not in allowableRatecontrols:
+		print("Unknown ratecontrol: " + str(args.ratecontrol))
+		print("Allowable ratecontrol is ")
+		exit()
+		
+	# Check for valid tolerance
+	if args.ratecontrol == "q" and args.tolerance != 1.0:
+		print("Tolerance has to be 1.0 for ratecontrol q")
+		print("Tolerance has been set to 1.0 and optimisation will continue")
+		arge.tolerance = 1.0
 	
 	# Check for valid initial guess
 	allowableQPs = np.arange(encoder[1], encoder[2]+1, 1)
@@ -510,7 +531,7 @@ def main():
 		
 		
 	# Insatiate Video class
-	video = Video(fileName, encoder)
+	video = Video(fileName, encoder, args.ratecontrol, args.tolerance)
 	
 	# Generate and order shots
 	video.generateShotList(args.threshold, args.guess)
@@ -522,8 +543,10 @@ def main():
 	# Print details
 	video.printSummary(args.quality)
 	
-	# Final transcode and quality check
+	# Final transcode
 	video.finalTranscode()
+	
+	# Optional final quality check
 	video.calculateVideoVMAF(args.model)
 	
 	# Store end time & print total time
