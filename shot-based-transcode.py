@@ -108,7 +108,7 @@ class Video:
 
 		x264 = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", "-i", self.videoFile, 
 				"-y", "-force_key_frames:v", IFramesString, 
-				"-c:v",	"libx264", "-preset:v", "medium", "-x264-params", paramsString, 
+				"-c:v",	"libx264", "-preset:v", "faster", "-x264-params", paramsString, 
 				"-profile:v", "high", "-color_primaries:v", "bt470bg", "-color_trc:v", 
 				"bt709", "-colorspace:v", "smpte170m", "-metadata:s:v", "title\=", 
 				"-disposition:v", "default", "-an", self.outputFile]
@@ -116,7 +116,7 @@ class Video:
 		# Run FFmpeg command
 		a = run(x264)
 		
-	
+	 
 	def finalTranscodeX264(self):
 		# Generate I-Frame and Zones strings for FFmpeg
 		IFramesString = "expr:"
