@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 
-from os.path import abspath, basename, splitext
+import os
 from subprocess import run
 import datetime
 from argparse import ArgumentParser
 
 import pandas as pd
 import numpy as np
-#from numpy.polynomial import polynomial as P
-#from scipy.interpolate import interp1d
 from scipy.interpolate import UnivariateSpline
 from scipy import stats
 
@@ -16,18 +14,63 @@ from scenedetect import VideoManager
 from scenedetect import SceneManager
 from scenedetect.detectors import ContentDetector
 
+version = """\
+shot-based-transcode.py 2020.11.25
+"""
+
+# Encoder options:
+#         --x265              use x265 rather than x264
+
+help = f"""\
+Script to transcode a video by optimising each shot individually.
+
+Usage: {os.path.basename(__file__)} FILE [OPTION...]
+
+Creates an `mkv` file in the current directory. The input video will be 
+converted to h.264 with a constant quality as measured by VMAF. The first 
+audio track will be transcoded with up to 6 channels (5.1) at 640kb/s 
+surround AC3. Any further audio tracks will be ignored. All subtitle 
+tracks will also be ignored. The video will be processed in no other way, 
+this includes no deinterlacing and no cropping.
+
+Optimisation options:
+-q,     --quality INT       sets the target quality (default: 85)
+        --crf               use CRF rate control rather than QP
+-dp,    --accuracy INT      number of decimal places of accuracy when
+                                using --crf mode (default: 0)	
+-g,     --guess INT         sets the initial guess (default: 30)	
+
+VMAF options:
+-m,     --model PATH        path to VMAF model 
+                                (default: /usr/local/share/model/vmaf_v0.6.1.pkl)
+-fs,    --frame-skip INT    skips N frames during processing (default: 2)
+
+Scene Detect options:
+-th,    --threshold FLOAT   sets the threshold for detecting a new scene (default: 30.0)
+
+Output options:
+        --skip-final-analysis
+                            skips the final VMAF calculations after the final encode
+
+Other options:
+-h,     --help              print this message and exit
+        --version           print version information and exit
+    
+Requires `ffmpeg` with VMAF support
+"""
+
 class Video:
 	
-	def __init__(self, videoFile, encoder, ratecontrol, tolerance):
+	def __init__(self, videoFile, encoder, crf, accuracy):
 		self.videoFile = videoFile
-		self.outputFile = basename(videoFile)
+		self.outputFile = os.path.basename(videoFile)
 		self.listOfShots = []
 		self.iteration = 0
 		self.encoder = encoder[0]
 		self.minQP = encoder[1]
 		self.maxQP = encoder[2]
-		self.rc = ratecontrol
-		self.tol = tolerance
+		self.crf = crf
+		self.dp = accuracy
 		
 
 	def generateShotList(self, threshold, guess):
@@ -76,7 +119,7 @@ class Video:
 		if self.encoder == "x264":
 			self.finalTranscodeX264()
 		elif self.encoder == "x265":
-			self.transcodeX265()
+			self.finalTranscodeX265()
 		else:
 			print("Unknown encoder, again!")
 		
@@ -87,17 +130,19 @@ class Video:
 		zonesString = "zones="
 		for shot in self.listOfShots:
 			if shot.isOptimised():
-				qp = self.maxQP
+				rate = self.maxQP
 			else:
-				qp = shot.nextQP
+				rate = shot.nextQP
 			
-			# If ratecontrol is qp make sure next qp is an int
-			if self.rc == "q":
-				qp = int(qp)
+			# If rate control is qp make sure next qp is an int
+			rc = "crf"
+			if not self.crf:
+				rate = int(rate)
+				rc = "q"
 				
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
-			zonesString += "," + str(self.rc) + "=" + str(qp)
+			zonesString += "," + rc + "=" + str(rate)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
 				IFramesString += "+"
 				zonesString += "/"
@@ -111,7 +156,7 @@ class Video:
 				"-c:v",	"libx264", "-preset:v", "faster", "-x264-params", paramsString, 
 				"-profile:v", "high", "-color_primaries:v", "bt470bg", "-color_trc:v", 
 				"bt709", "-colorspace:v", "smpte170m", "-metadata:s:v", "title\=", 
-				"-disposition:v", "default", "-an", self.outputFile]
+				"-disposition:v", "default", "-an", self.outputFile ]
 		
 		# Run FFmpeg command
 		a = run(x264)
@@ -122,15 +167,17 @@ class Video:
 		IFramesString = "expr:"
 		zonesString = "zones="
 		for shot in self.listOfShots:
-			qp = shot.nextQP
+			rate = shot.nextQP
 			
-			# If ratecontrol is qp make sure next qp is an int
-			if self.rc == "q":
-				qp = int(qp)
+			# If rate control is qp make sure next qp is an int
+			rc = "crf"
+			if not self.crf:
+				rate = int(rate)
+				rc = "q"
 				
 			IFramesString += "eq(n," + str(shot.firstFrame) + ")"
 			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
-			zonesString += "," + str(self.rc) + "=" + str(qp)
+			zonesString += "," + rc + "=" + str(rate)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
 				IFramesString += "+"
 				zonesString += "/"
@@ -157,8 +204,57 @@ class Video:
 		# Generate Zones strings for FFmpeg
 		zonesString = "zones="
 		for shot in self.listOfShots:
-			qp = shot.nextQP
-			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame) + ",q=" + str(qp)
+			if shot.isOptimised():
+				rate = self.maxQP
+			else:
+				rate = shot.nextQP
+			
+			# If rate control is qp make sure next qp is an int
+			rc = "crf"
+			if not self.crf:
+				rate = int(rate)
+				rc = "q"
+				
+			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
+			zonesString += "," + rc + "=" + str(rate)
+			if shot.firstFrame != self.listOfShots[-1].firstFrame:
+				zonesString += "/"
+		
+		# Generate complete x265 parameter string for FFmpeg		
+		statsFileName = "stats-" + str(self.iteration) + ".csv"
+		paramsString = "scenecut=0:csv=" + statsFileName + ":csv-log-level=1:"
+		if self.iteration == 0:
+			paramsString += "analysis-save=analysis.dat:analysis-save-reuse-level=10:"
+		else:
+			paramsString += "analysis-load=analysis.dat:analysis-load-reuse-level=10:"
+		paramsString += zonesString
+		
+		# Full FFmpeg command
+		x265 = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", "-i", self.videoFile, 
+				"-y", "-c:v", "libx265", "-preset:v", "medium", 
+				"-x265-params", paramsString, "-color_primaries:v", 
+				"bt470bg", "-color_trc:v", "bt709", "-colorspace:v", "smpte170m", 
+				"-metadata:s:v", "title\=", "-disposition:v", "default", "-an", 
+				"-sn", self.outputFile]
+		
+		# Run FFmpeg command
+		a = run(x265)
+		
+	
+	def finalTranscodeX265(self):
+		# Generate Zones strings for FFmpeg
+		zonesString = "zones="
+		for shot in self.listOfShots:
+			rate = shot.nextQP
+			
+			# If rate control is qp make sure next qp is an int
+			rc = "crf"
+			if not self.crf:
+				rate = int(rate)
+				rc = "q"
+				
+			zonesString += str(shot.firstFrame) + "," + str(shot.lastFrame)
+			zonesString += "," + rc + "=" + str(rate)
 			if shot.firstFrame != self.listOfShots[-1].firstFrame:
 				zonesString += "/"
 		
@@ -174,7 +270,7 @@ class Video:
 		# Full FFmpeg command
 		x265 = [ "ffmpeg", "-hide_banner", "-v", "error", "-stats", "-i", self.videoFile, 
 				"-y", "-map", "0:0", "-c:v", "libx265", "-preset:v", "medium", 
-				"-x265-params", x265ParamsString, "-color_primaries:v", 
+				"-x265-params", paramsString, "-color_primaries:v", 
 				"bt470bg", "-color_trc:v", "bt709", "-colorspace:v", "smpte170m", 
 				"-metadata:s:v", "title\=", "-disposition:v", "default", "-map", "0:1", 
 				"-c:a:0", "ac3", "-b:a:0", "640k", "-metadata:s:a:0", "title\=", 
@@ -188,7 +284,7 @@ class Video:
 		print("Calculating quality ...")
 		
 		# VMAF CSV File Name
-		vmafOut = splitext(self.outputFile)[0] + "-vmaf.csv"
+		vmafOut = os.path.splitext(self.outputFile)[0] + "-vmaf.csv"
 		
 		# Assemble select, scale and vmaf filter strings		
 		scaleStringMain = "[0:v]scale=1920x1080:flags=bicubic,settb=AVTB,setpts=PTS-STARTPTS[main]; "
@@ -254,7 +350,7 @@ class Video:
 				selectString += "+"
 				
 		# VMAF CSV File Name
-		vmafOut = splitext(self.outputFile)[0] + "-vmaf.csv"
+		vmafOut = os.path.splitext(self.outputFile)[0] + "-vmaf.csv"
 		
 		# Assemble select, scale and vmaf filter strings
 		selectStringMain = "[0:v]" + selectString + "[main]; "
@@ -263,7 +359,7 @@ class Video:
 		scaleStringRef = "[ref]scale=1920x1080:flags=bicubic,settb=AVTB,setpts=PTS-STARTPTS[ref]; "		
 		vmafFilterString = "[main][ref]libvmaf=model_path=" + modelPath
 		vmafFilterString += ":log_path=" + vmafOut
-		vmafFilterString += ":log_fmt=csv:n_subsample=" + str(subSample)
+		vmafFilterString += ":log_fmt=csv:n_subsample=" + str(subSample+1)
 		
 		# Assemble final filter string
 		filterString = selectStringMain + scaleStringMain + selectStringRef + \
@@ -291,11 +387,13 @@ class Video:
 			
 			# Add QP-VMAF pair to shot object
 			shot[0].addQpVmaf(shot[0].nextQP, aveVmaf)
+			
+		os.remove(vmafOut)
 	
 	
 	def calculateNewSettings(self, targetVMAF):
 		for shot in self.listOfShots:
-			shot.calculateNewQP(targetVMAF, self.minQP, self.maxQP, self.tol)
+			shot.calculateNewQP(targetVMAF, self.minQP, self.maxQP, self.dp)
 			
 	
 	def printSummary(self, targetVMAF):
@@ -369,7 +467,7 @@ class Shot:
 		self.qpVmaf = []
 	
 	
-	def calculateNewQP(self, targetVMAF, minQP, maxQP, tol):
+	def calculateNewQP(self, targetVMAF, minQP, maxQP, dp):
 		# Make sure there is some data to process
 		numDataPoints = len(self.qpVmaf)
 		if numDataPoints == 0:
@@ -422,7 +520,7 @@ class Shot:
 				break
 		
 		# Use minQP and maxQP to construct array of all allowable QPs
-		allowableQPs = np.arange(minQP, maxQP+1, tol)
+		allowableQPs = np.arange(minQP, maxQP+1, (1.0/(10**dp)))
 			
 		# Separate into x's and y's and recalculate number of data points
 		x = [x[0] for x in qpVmafSorted]
@@ -444,7 +542,7 @@ class Shot:
 		# Select value closest to targetVMAF. Then limit the size of QP jump. Then round.
 		nextQP = min(qpVmafPredictions, key=lambda l: abs(l[1] - targetVMAF))[0]
 		nextQP = min(nextQP, self.nextQP + maxQpStep)
-		nextQP = round(nextQP, int(-np.log10(tol)))
+		nextQP = round(nextQP, dp)
 		self.nextQP = nextQP
 		return 1
 		
@@ -479,76 +577,66 @@ class Shot:
 		return optimised
 
 
+
 def main():
 	# Store start time
 	startTime = datetime.datetime.now()
 	
-	# Manage arguments
-	parser = ArgumentParser()
+	# Create arguments
+	parser = ArgumentParser(add_help=False)
 	parser.add_argument("file", nargs="?")
+	#parser.add_argument("--x265", action="store_true", default=False)
 	parser.add_argument("-q", "--quality", type=float, default=85.0)
-	parser.add_argument("-e", "--encoder", type=str, default="x264")
-	parser.add_argument("-rc", "--ratecontrol", type=str, default="q")
-	parser.add_argument("-tol", "--tolerance", type=float, default=1.0)
+	parser.add_argument("--crf", action="store_true", default=False)
+	parser.add_argument("-dp", "--accuracy", type=int, default=0)
 	parser.add_argument("-g", "--guess", type=int, default=30)
+	
 	parser.add_argument("-th", "--threshold", type=float, default=30.0)
+	
 	parser.add_argument("-m", "--model", type=str, default="/usr/local/share/model/vmaf_v0.6.1.pkl")
-	parser.add_argument("-s", "--subsample", type=int, default=1)
+	parser.add_argument("-fs", "--frame-skip", type=int, default=2)
+	
+	parser.add_argument("--skip-final-analysis", action="store_true", default=False)
+	
+	parser.add_argument("-h", "--help", action="store_true", default=False)
+	parser.add_argument("--version", action="store_true", default=False)
+	
 	args = parser.parse_args()
-	fileName = abspath(args.file)
 	
-	# Check for valid quality targetVMAF
-	if not 0.0 < args.quality < 100.0:
-		print("Invalid target quality value: " + str(args.quality))
-		print("Target quality value has to be between 0.0 and 100.0")
-		print("Recommended target quality values are between 50.0 and 90.0")
+	# Print version and exit
+	if args.version:
+		print(version)
 		exit()
-	elif not 50.0 <= args.quality <= 90.0:
-		print("Target quality value " + str(args.quality) + " is valid")
-		print("However a target quality value are between 50.0 and 90.0 is recommended")
 	
-	# Check for valid encoder
-	allowableEncoders = ["x264", "x265"]
-	if args.encoder not in allowableEncoders:
-		print("Unknown encoder: " + str(args.encoder))
-		print("Allowable encoders are ")
+	# Print help and exit
+	if args.help:
+		print(help)
+		exit()
+		
+	# Check file name
+	if os.path.exists(args.file):
+		fileName = os.path.abspath(args.file)
+	else:
+		print("Error, file " + str(args.file) + " does not exist")
 		exit()
 		
 	# Select correct encoder tuple (encoderName, minQP, maxQP)
 	encoder = ("x264", 10, 51)
-	if args.encoder == "x265":
-		encoder = ("x265", 0, 61)
+	#if args.x265:
+	#	encoder = ("x265", 0, 61)
 	
-	# Check for valid ratecontrol
-	allowableRatecontrols = ["q", "crf"]
-	if args.ratecontrol not in allowableRatecontrols:
-		print("Unknown ratecontrol: " + str(args.ratecontrol))
-		print("Allowable ratecontrol is ")
-		exit()
+	# Validate complex arguments
+	validateArguments(args, encoder)
 		
-	# Check for valid tolerance
-	if args.ratecontrol == "q" and args.tolerance != 1.0:
-		print("Tolerance has to be 1.0 for ratecontrol q")
-		print("Tolerance has been set to 1.0 and optimisation will continue")
-		arge.tolerance = 1.0
-	
-	# Check for valid initial guess
-	allowableQPs = np.arange(encoder[1], encoder[2]+1, 1)
-	if args.guess not in allowableQPs:
-		print("Initial guess QP value " + str(args.guess) + " is invalid")
-		print("Allowable values are whole numbers between " + str(encoder[1]) + " and " + str(encoder[2]))
-		exit()
-		
-		
-	# Insatiate Video class
-	video = Video(fileName, encoder, args.ratecontrol, args.tolerance)
+	# Instantiate Video class
+	video = Video(fileName, encoder, args.crf, args.accuracy)
 	
 	# Generate and order shots
 	video.generateShotList(args.threshold, args.guess)
 	video.sortShots()
 	
 	# Optimise for quality (re-transcode until suitable VMAF achieved)
-	video.optimise(args.quality, args.model, args.subsample)
+	video.optimise(args.quality, args.model, args.frame_skip)
 	
 	# Print details
 	#video.printSummary(args.quality)
@@ -557,11 +645,51 @@ def main():
 	video.finalTranscode()
 	
 	# Optional final quality check
-	video.calculateVideoVMAF(args.model)
+	if not args.skip_final_analysis:
+		video.calculateVideoVMAF(args.model)
 	
 	# Store end time & print total time
 	endTime = datetime.datetime.now()
 	print("Encoding time: " + str(endTime-startTime))
+	
+
+def validateArguments(args, encoder):
+	
+	# Check for valid quality targetVMAF
+	if not 0.0 < args.quality < 100.0:
+		print("Invalid target quality value: " + str(args.quality))
+		print("Target quality value has to be between 0.0 and 100.0")
+		print("Recommended target quality values are between 70.0 and 95.0")
+		exit()
+	elif not 70.0 <= args.quality <= 95.0:
+		print("Target quality value " + str(args.quality) + " is valid")
+		print("However a target quality value are between 70.0 and 95.0 is recommended")
+		
+	# Check for valid accuracy
+	if not args.crf:
+		args.accuracy = 0
+		print("Accuracy has no effect unless you use --crf")
+	if args.accuracy < 0:
+		print("Invalid accuracy value: " + str(args.accuracy))
+		print("Accuracy has to be positive.")
+		exit()
+	if args.accuracy > 3:
+		print("Accuracy value " + str(args.accuracy) + " is valid")
+		print("However an accuracy value greater than 3 is not recommended")
+	
+	# Check for valid initial guess
+	allowableQPs = np.arange(encoder[1], encoder[2]+1, 1)
+	if args.guess not in allowableQPs:
+		print("Initial guess QP value " + str(args.guess) + " is invalid")
+		print("Allowable values are whole numbers between " + str(encoder[1]) + " and " + str(encoder[2]))
+		exit()
+		
+	# Check for valid threshold
+	if args.threshold > 100.0 or args.threshold < 0.0:
+		print("Invalid threshold value: " + str(args.threshold))
+		print("Threshold has to be between 0.0 and 100.0")
+		exit()
+		
 	
 if __name__ == "__main__":
 	main()

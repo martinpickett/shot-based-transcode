@@ -23,6 +23,7 @@ This script relies on several pieces of third party software without which it wi
 - [FFmpeg](https://ffmpeg.org)
 	- [x264](https://www.videolan.org/developers/x264.html)
 	- [VMAF](https://github.com/Netflix/vmaf)
+
 If you understand all this and are confident you have it all installed please skip ahead to usage section. Otherwise, please follow the installation guide for your operating system.
 
 ### Windows
